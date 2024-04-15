@@ -3,7 +3,7 @@ import argparse
 import numpy as np
 import torch
 from torch.autograd import Variable
-from load_data import SparseDataset
+from load_data_custom import SparseDataset
 import os
 import torch.multiprocessing
 import time
@@ -126,6 +126,10 @@ parser.add_argument(
     '--train_step', type=int, default=3,  
     help='Training step when using pointnet: 1,2,3')
 
+parser.add_argument(
+    '--train_step', type=int, default=3,  
+    help='Training step when using pointnet: 1,2,3')
+
 if __name__ == '__main__':
     opt = parser.parse_args()
     
@@ -157,11 +161,7 @@ if __name__ == '__main__':
         net = MDGAT(config.get('net', {}))
     optimizer = torch.optim.Adam(net.parameters(), lr=config.get('net', {}).get('lr'))
     net = torch.nn.DataParallel(net)
-    net.load_state_dict(checkpoint['net']) 
-    start_epoch = checkpoint['epoch'] + 1  
-    best_loss = checkpoint['loss']
-    print('Resume from ', opt.resume_model)
-
+    net.load_state_dict(checkpoint['net'])
     
     if torch.cuda.is_available():
         # torch.cuda.set_device(opt.local_rank)

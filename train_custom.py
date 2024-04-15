@@ -38,7 +38,7 @@ parser.add_argument(
     help='If memory is enough, load all the data')
         
 parser.add_argument(
-    '--batch_size', type=int, default=1, #128
+    '--batch_size', type=int, default=16, #128
     help='Batch size')
 
 parser.add_argument(
@@ -219,7 +219,7 @@ if __name__ == '__main__':
     val_set = SparseDataset(opt, 'val')
     
     val_loader = torch.utils.data.DataLoader(dataset=val_set, shuffle=False, batch_size=opt.batch_size, num_workers=10, drop_last=True, pin_memory = True)
-    train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=False, batch_size=opt.batch_size, num_workers=10, drop_last=True, pin_memory = True)
+    train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=True, batch_size=opt.batch_size, num_workers=10, drop_last=True, pin_memory = True)
     
     mean_loss = []
     for epoch in range(start_epoch, opt.epoch+1):
@@ -233,7 +233,6 @@ if __name__ == '__main__':
             # pred['cloud0'] = pred['cloud0'].permute(0,2,1)
             # pred['cloud1'] = pred['cloud1'].permute(0,2,1)
 
-            print (pred["cloud0"].shape, pred["cloud1"].shape, pred["keypoints0"].shape, pred["keypoints1"].shape, pred["scores0"].shape, pred["scores1"].shape)
             for k in pred:
                 if k!='idx0' and k!='idx1' and k!='sequence':
                     if type(pred[k]) == torch.Tensor:

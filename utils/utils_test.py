@@ -147,9 +147,13 @@ def solve_icp(P, Q):
 #     return T
 
 def plot_match(pc0, pc1, kpts0, kpts1, mkpts0, mkpts1, mkpts0_gt, mkpts1_gt, matches, mconf, true_positive, false_positive, T, radius):
-	
+    pc0 = pc0[0].cpu().numpy()
+    pc1 = pc1[0].cpu().numpy()
     pc0 = pc0[pc0[:,2]>-5]
     pc1 = pc1[pc1[:,2]>-5]
+    pc0 = pc0.reshape(-1, 4)
+    pc1 = pc1.reshape(-1, 4)
+    print(pc0.shape, pc1.shape)
     # pc0 = mkpts0[mkpts0[:,2]>-4]
     # pc1 = mkpts1[mkpts1[:,2]>-4]
     pcd_source_keypoints, pcd_target_keypoints = o3d.geometry.PointCloud(), o3d.geometry.PointCloud()

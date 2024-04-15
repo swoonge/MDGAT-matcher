@@ -1,11 +1,14 @@
 import numpy as np
 import torch
 import os
+import open3d as o3d
 from scipy.spatial.distance import cdist
 from torch.utils.data import Dataset
 import open3d as o3d 
 from sklearn.neighbors import KDTree
 import time
+import random
+
 def load_kitti_gt_txt(txt_root, seq):
     '''
     :param txt_root:
@@ -13,6 +16,7 @@ def load_kitti_gt_txt(txt_root, seq):
     :return: [{anc_idx: *, pos_idx: *, seq: *}]                
      '''
     dataset = []
+
     with open(os.path.join(txt_root, '%02d'%seq, 'groundtruths.txt'), 'r') as f:
         lines_list = f.readlines()
         for i, line_str in enumerate(lines_list):
@@ -50,7 +54,7 @@ class SparseDataset(Dataset):
     descriptors and ground truth matches which will be used in training."""
 
     def __init__(self, opt, mode):
-
+        self.flag_count = 0
         self.train_path = opt.train_path
         self.keypoints = opt.keypoints
         self.keypoints_path = opt.keypoints_path
@@ -66,6 +70,7 @@ class SparseDataset(Dataset):
         self.calib={}
         self.pose={}
         self.pc = {}
+        self.random_sample_num = 16384
         
         for seq in self.seq_list:
             sequence = '%02d'%seq
@@ -120,23 +125,30 @@ class SparseDataset(Dataset):
 
         # relative_pos = self.dataset[idx]['anc_idx']
 
-        if self.memory_is_enough:
+        if self.memory_is_enough: # If memory is enough, load all the data -> True
+            # Retrieve point cloud data from memory
             sequence = sequence = '%02d'%seq
             pc_np1 = self.pc[sequence][index_in_seq]
-
+            
+            pc_np2 = self.pc[sequence][index_in_seq2]
+            print("sequence, index_in_seq, pc_np1", sequence, index_in_seq, len(pc_np1))
+            print("sequence, index_in_seq2, pc_np2", sequence, index_in_seq2, len(pc_np2))
+            # Reshape point cloud data
             pc_np1 = pc_np1.reshape((-1, 37))
+            pc_np2 = pc_np2.reshape((-1, 37))
+
+            # Extract keypoints, scores, descriptors, and poses
             kp1 = pc_np1[:, :3]
             score1 = pc_np1[:, 3]
             descs1 = pc_np1[:, 4:]
             pose1 = self.pose[sequence][index_in_seq] 
 
-            pc_np2 = self.pc[sequence][index_in_seq2]
-            pc_np2 = pc_np2.reshape((-1, 37))
             kp2 = pc_np2[:, :3]
             score2 = pc_np2[:, 3]
             descs2 = pc_np2[:, 4:]
             pose2 = self.pose[sequence][index_in_seq2]
 
+            # Retrieve calibration data
             T_cam0_velo = self.calib[sequence]
             # q = np.asarray([rot[3], rot[0], rot[1], rot[2]])
             # t = np.asarray(trans)
@@ -168,37 +180,49 @@ class SparseDataset(Dataset):
 
             T_cam0_velo = self.calib[sequence]
 
+        # Load point cloud data -> False
         if self.descriptor == 'pointnet' or self.descriptor == 'pointnetmsg':
-            pc_file1 = os.path.join(self.train_path, 'kitti_randomsample_16384_n8', sequence, '%06d.bin' % index_in_seq)
-            pc_file2 = os.path.join(self.train_path, 'kitti_randomsample_16384_n8', sequence, '%06d.bin' % index_in_seq2)
+            pc_file1 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
+            pc_file2 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
             pc1 = np.fromfile(pc_file1, dtype=np.float32)
             pc2 = np.fromfile(pc_file2, dtype=np.float32)
+            pc1 = pc1.reshape((-1, 4))
+            pc2 = pc2.reshape((-1, 4))
+
+            pc1 = pc1[np.random.choice(pc1.shape[0], 16384, replace=False), :]
+            pc2 = pc2[np.random.choice(pc2.shape[0], 16384, replace=False), :]
+
             pc1 = pc1.reshape((-1, 8))
             pc2 = pc2.reshape((-1, 8))
+
             pc1, pc2 = torch.tensor(pc1, dtype=torch.double), torch.tensor(pc2, dtype=torch.double)
-   
+
+        # Ensure the number of keypoints -> False
         if self.ensure_kpts_num:
             # kp1_num = min(self.nfeatures, len(kp1))
             # kp2_num = min(self.nfeatures, len(kp2))
-            valid1 = score1>10
-            valid2 = score2>10
-            kp1=kp1[valid1]
-            kp2=kp2[valid2]
-            score1=score1[valid1]
-            score2=score2[valid2]
-            descs1=descs1[valid1]
-            descs2=descs2[valid2]
+            # Modify the selected code to filter out keypoints and descriptors based on a score threshold
+            valid1 = score1 > 10
+            valid2 = score2 > 10
+            kp1 = kp1[valid1]
+            kp2 = kp2[valid2]
+            score1 = score1[valid1]
+            score2 = score2[valid2]
+            descs1 = descs1[valid1]
+            descs2 = descs2[valid2]
             kp1_num = self.nfeatures
             kp2_num = self.nfeatures
+            # If the number of keypoints is less than the desired number, repeat the keypoints, scores, and descriptors
+            # If the number of keypoints is greater than the desired number, filter out the keypoints, scores, and descriptors
             if kp1_num < len(kp1):
                 kp1 = kp1[:kp1_num]
                 score1 = score1[:kp1_num]
                 descs1 = descs1[:kp1_num]
             else:
                 while kp1_num > len(kp1):
-                    kp1 = np.vstack((kp1[:(kp1_num-len(kp1))], kp1))
-                    score1 = np.hstack((score1[:(kp1_num-len(score1))], score1))
-                    descs1 = np.vstack((descs1[:(kp1_num-len(descs1))], descs1))
+                    kp1 = np.vstack((kp1[:(kp1_num - len(kp1))], kp1))
+                    score1 = np.hstack((score1[:(kp1_num - len(score1))], score1))
+                    descs1 = np.vstack((descs1[:(kp1_num - len(descs1))], descs1))
             
             if kp2_num < len(kp2):
                 kp2 = kp2[:kp2_num]
@@ -217,8 +241,8 @@ class SparseDataset(Dataset):
 
         vis_registered_pointcloud = False
         if vis_registered_pointcloud:
-            pc_file1 = os.path.join(self.train_path, 'kitti_randomsample_16384_n8', sequence, '%06d.bin' % index_in_seq)
-            pc_file2 = os.path.join(self.train_path, 'kitti_randomsample_16384_n8', sequence, '%06d.bin' % index_in_seq2)
+            pc_file1 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
+            pc_file2 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
             pc1 = np.fromfile(pc_file1, dtype=np.float32)
             pc2 = np.fromfile(pc_file2, dtype=np.float32)
             pc1 = pc1.reshape((-1, 8))
@@ -293,7 +317,6 @@ class SparseDataset(Dataset):
 
         descs1, descs2 = torch.tensor(descs1, dtype=torch.double), torch.tensor(descs2, dtype=torch.double)
         scores1_np, scores2_np = torch.tensor(scores1_np, dtype=torch.double), torch.tensor(scores2_np, dtype=torch.double)
-
         
 
         return{
@@ -313,8 +336,8 @@ class SparseDataset(Dataset):
             # 'pose2': pose2,
             # 'T_cam0_velo': T_cam0_velo,
             'T_gt': T_gt,
-            # 'cloud0': pc1,
-            # 'cloud1': pc2,
+            'cloud0': pc1,
+            'cloud1': pc2,
             # 'all_matches': list(all_matches),
             # 'file_name': file_name
             'rep': rep
