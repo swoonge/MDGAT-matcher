@@ -253,10 +253,10 @@ class AttentionalGNN(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([
             AttentionalPropagation(feature_dim, 4)
-            for _ in range(len(layer_names))])
-        self.names = layer_names
+            for _ in range(len(layer_names))]) # self.config['descriptor_dim']
+        self.names = layer_names # ['self', 'cross']*self.config['L'])
 
-    def forward(self, desc0, desc1, k_list, L):
+    def forward(self, desc0, desc1, k_list0, k_list1, L):
         i = 0
         for layer, name in zip(self.layers, self.names):
             layer.attn.prob = []
@@ -265,9 +265,10 @@ class AttentionalGNN(nn.Module):
             else:
                 src0, src1 = desc0, desc1
 
-            if i > 2*L-1-len(k_list):
-                k = k_list[i-2*L+len(k_list)]
-                delta0, delta1 = layer(desc0, src0, k), layer(desc1, src1, k)
+            if i > 2*L-1-len(k_list0):
+                k0 = k_list0[i-2*L+len(k_list0)]
+                k1 = k_list1[i-2*L+len(k_list1)]
+                delta0, delta1 = layer(desc0, src0, k0), layer(desc1, src1, k1)
             else:
                 delta0, delta1 = layer(desc0, src0, None), layer(desc1, src1, None)
             
@@ -366,6 +367,91 @@ class MDGAT(nn.Module):
         self.triplet_loss_gamma = config['triplet_loss_gamma']
         self.train_step = config['train_step']
 
+    def infer_desc(self, data):
+        # print(data['keypoints0'].shape)
+        # print(data['cloud0'].shape)
+        # print(data['scores0'].shape)
+        kpts = data['keypoints0'].double()
+        if kpts.shape[1] == 0:  # no keypoints
+            return {'desc': torch.zeros((kpts.shape[0], 128), dtype=torch.double)}
+        
+        pc = data['cloud0'].double()
+        desc = self.penc(pc, kpts, data['scores0'])
+
+        return {'desc': desc} # use -1 for invalid match
+    
+    def infer_mdgat(self, data, k0, k1):
+        kpts0, kpts1 = data['keypoints0'].double(), data['keypoints1'].double()
+    
+        if kpts0.shape[1] == 0 or kpts1.shape[1] == 0:  # no keypoints
+            shape0, shape1 = kpts0.shape[:-1], kpts1.shape[:-1]
+            return {
+                'matches0': kpts0.new_full(shape0, -1, dtype=torch.int)[0],
+                'matches1': kpts1.new_full(shape1, -1, dtype=torch.int)[0],
+                'matching_scores0': kpts0.new_zeros(shape0)[0],
+                'matching_scores1': kpts1.new_zeros(shape1)[0],
+                'skip_train': True
+            }
+        
+        desc0, desc1 = data['descriptors0'].double(), data['descriptors1'].double()
+
+        if self.train_step == 1: # update pointnet only
+            mdesc0, mdesc1 = desc0, desc1 
+        elif self.train_step == 2: # update gnn only      
+            desc0, desc1 = desc0.detach(), desc1.detach()
+            '''Multi-layer Transformer network.'''
+            desc0, desc1 = self.gnn(desc0, desc1, k0, k1, self.config['L'])
+            '''Final MLP projection.'''
+            mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
+        elif self.train_step == 3: # update pointnet and gnn
+            '''Multi-layer Transformer network.'''
+            desc0, desc1 = self.gnn(desc0, desc1, k0, k1, self.config['L'])
+            '''Final MLP projection.'''
+            mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
+        else:
+            raise Exception('Invalid train_step.')
+        scores = torch.einsum('bdn,bdm->bnm', mdesc0, mdesc1)
+        scores = scores / self.config['descriptor_dim']**.5
+
+        scores = log_optimal_transport(
+        scores, self.bin_score,
+        iters=self.config['sinkhorn_iterations'])
+    
+        '''directly determine the non_matches on scores matrix'''
+        max0, max1 = scores[:, :-1, :].max(2), scores[:, :, :-1].max(1)
+        indices0, indices1 = max0.indices, max1.indices
+        valid0, valid1 = indices0<(scores.size(2)-1), indices1<(scores.size(1)-1)
+        zero = scores.new_tensor(0)
+        if valid0.sum() == 0:
+            mscores0 = torch.zeros_like(indices0, device='cuda')
+            mscores1 = torch.zeros_like(indices1, device='cuda')
+        else:
+            if self.mutual_check:
+                batch = indices0.size(0)
+                a0 = arange_like(indices0, 1)[None][valid0].view(batch,-1) == indices1.gather(1, indices0[valid0].view(batch,-1))
+                a1 = arange_like(indices1, 1)[None][valid1].view(batch,-1) == indices0.gather(1, indices1[valid1].view(batch,-1))
+                mutual0 = torch.zeros_like(indices0, device='cuda') > 0
+                mutual1 = torch.zeros_like(indices1, device='cuda') > 0
+                mutual0[valid0] = a0
+                mutual1[valid1] = a1
+                mscores0 = torch.where(mutual0, max0.values.exp(), zero)
+                mscores1 = torch.where(mutual1, max1.values.exp(), zero)
+            else:
+                mscores0 = torch.where(valid0, max0.values.exp(), zero)
+                mscores1 = torch.where(valid1, max1.values.exp(), zero)
+        indices0 = torch.where(valid0, indices0, indices0.new_tensor(-1))
+        indices1 = torch.where(valid1, indices1, indices1.new_tensor(-1))
+
+        return {
+            'matches0': indices0, # use -1 for invalid match
+            'matches1': indices1, # use -1 for invalid match
+            'matching_scores0': mscores0,
+            'matching_scores1': mscores1,
+            # 'loss': loss_mean,
+            # 'skip_train': False
+        }
+
+                
     def forward(self, data):
         """Run SuperGlue on a pair of keypoints and descriptors"""
         

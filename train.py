@@ -6,6 +6,7 @@ import torch
 from torch.autograd import Variable
 import torch.multiprocessing
 from tqdm import tqdm
+from torch import optim
 import time
 from tensorboardX import SummaryWriter
 from models.superglue import SuperGlue
@@ -70,7 +71,7 @@ parser.add_argument(
     help='Layers number of GNN')
 
 parser.add_argument(
-    '--descriptor', type=str, default='pointnetmsg', 
+    '--descriptor', type=str, default='FPFH', 
     help='Choose keypoint descriptor : FPFH pointnet pointnetmsg FPFH_gloabal FPFH_only')
 
 parser.add_argument(
@@ -98,8 +99,11 @@ parser.add_argument(
     '--train_path', type=str, default='./KITTI/', 
     help='Path to the directory of training scans.')
 
+# tsf_256_FPFH_16384-512-k1k16-2d-nonoise
+# default='./KITTI/keypoints/tsf_256_FPFH_nr05_dr125',
+# default='./KITTI/keypoints/tsf_256_FPFH_16384-512-k1k16-2d-nonoise',
 parser.add_argument(
-    '--keypoints_path', type=str, default='./KITTI/keypoints/tsf_256_FPFH_16384-512-k1k16-2d-nonoise',
+    '--keypoints_path', type=str, default='./KITTI/keypoints/tsf_256_FPFH_nr05_dr125',
     help='Path to the directory of kepoints.')
 
 parser.add_argument(
@@ -172,7 +176,7 @@ if __name__ == '__main__':
         start_epoch = 1
         best_loss = 1e6
         lr=opt.learning_rate
-    
+
     config = {
             'net': {
                 'sinkhorn_iterations': opt.sinkhorn_iterations,
@@ -184,7 +188,8 @@ if __name__ == '__main__':
                 'mutual_check': opt.mutual_check,
                 'triplet_loss_gamma': opt.triplet_loss_gamma,
                 'train_step':opt.train_step,
-                'L':opt.l
+                'L':opt.l,
+                'scheduler_gamma': 0.1**(1/500)
             }
         }
     
@@ -207,11 +212,15 @@ if __name__ == '__main__':
 
     if opt.resume:
         net.load_state_dict(checkpoint['net']) 
-        optimizer = torch.optim.Adam(net.parameters(), lr=config.get('net', {}).get('lr'))
+        optimizer = torch.optim.AdamW(net.parameters(), lr=config.get('net', {}).get('lr'), betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5)
+        # scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=scheduler_gamma)
+
         print('Resume from:', opt.resume_model, 'at epoch', start_epoch, ',loss', loss, ',lr', lr,'.\nSo far best loss',best_loss,
         "\n====================")
     else:
-        optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5)
+        lr_schedule = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.get('net', {}).get('scheduler_gamma'))
+        
         print('====================\nStart new training')
 
 
@@ -233,7 +242,7 @@ if __name__ == '__main__':
             # pred['cloud0'] = pred['cloud0'].permute(0,2,1)
             # pred['cloud1'] = pred['cloud1'].permute(0,2,1)
 
-            print (pred["cloud0"].shape, pred["cloud1"].shape, pred["keypoints0"].shape, pred["keypoints1"].shape, pred["scores0"].shape, pred["scores1"].shape)
+            # print (pred["cloud0"].shape, pred["cloud1"].shape, pred["keypoints0"].shape, pred["keypoints1"].shape, pred["scores0"].shape, pred["scores1"].shape)
             for k in pred:
                 if k!='idx0' and k!='idx1' and k!='sequence':
                     if type(pred[k]) == torch.Tensor:

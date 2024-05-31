@@ -197,7 +197,8 @@ if __name__ == '__main__':
                         pred[k] = Variable(pred[k].cuda().detach())
                     else:
                         pred[k] = Variable(torch.stack(pred[k]).cuda().detach())
-            
+            data_t = net.module.infer(pred)
+            # print(data_t)
             data = net(pred) 
             pred = {**pred, **data}
 

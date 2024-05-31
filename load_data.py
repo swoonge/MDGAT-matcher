@@ -105,6 +105,7 @@ class SparseDataset(Dataset):
                     file = os.path.join(self.keypoints_path, sequence, folder[idx])
                     if os.path.isfile(file):
                         pc = np.fromfile(file, dtype=np.float32)
+                        # print(pc.shape)
                         pcs.append(pc)
                     else:
                         pcs.append([0])
@@ -126,29 +127,22 @@ class SparseDataset(Dataset):
         # relative_pos = self.dataset[idx]['anc_idx']
 
         if self.memory_is_enough: # If memory is enough, load all the data -> True
-            # Retrieve point cloud data from memory
             sequence = sequence = '%02d'%seq
             pc_np1 = self.pc[sequence][index_in_seq]
-            
-            pc_np2 = self.pc[sequence][index_in_seq2]
-            print("sequence, index_in_seq, pc_np1", sequence, index_in_seq, len(pc_np1))
-            print("sequence, index_in_seq2, pc_np2", sequence, index_in_seq2, len(pc_np2))
-            # Reshape point cloud data
-            pc_np1 = pc_np1.reshape((-1, 37))
-            pc_np2 = pc_np2.reshape((-1, 37))
 
-            # Extract keypoints, scores, descriptors, and poses
+            pc_np1 = pc_np1.reshape((-1, 37))
             kp1 = pc_np1[:, :3]
             score1 = pc_np1[:, 3]
             descs1 = pc_np1[:, 4:]
             pose1 = self.pose[sequence][index_in_seq] 
 
+            pc_np2 = self.pc[sequence][index_in_seq2]
+            pc_np2 = pc_np2.reshape((-1, 37))
             kp2 = pc_np2[:, :3]
             score2 = pc_np2[:, 3]
             descs2 = pc_np2[:, 4:]
             pose2 = self.pose[sequence][index_in_seq2]
 
-            # Retrieve calibration data
             T_cam0_velo = self.calib[sequence]
             # q = np.asarray([rot[3], rot[0], rot[1], rot[2]])
             # t = np.asarray(trans)
@@ -180,22 +174,26 @@ class SparseDataset(Dataset):
 
             T_cam0_velo = self.calib[sequence]
 
+        # print(kp1.shape)
+
+        # match1, match2 = match1[norm1 != 0], match2[norm2 != 0]
+
         # Load point cloud data -> False
-        if self.descriptor == 'pointnet' or self.descriptor == 'pointnetmsg':
-            pc_file1 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
-            pc_file2 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
-            pc1 = np.fromfile(pc_file1, dtype=np.float32)
-            pc2 = np.fromfile(pc_file2, dtype=np.float32)
-            pc1 = pc1.reshape((-1, 4))
-            pc2 = pc2.reshape((-1, 4))
+        # if self.descriptor == 'pointnet' or self.descriptor == 'pointnetmsg':
+        #     pc_file1 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
+        #     pc_file2 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
+        #     pc1 = np.fromfile(pc_file1, dtype=np.float32)
+        #     pc2 = np.fromfile(pc_file2, dtype=np.float32)
+        #     pc1 = pc1.reshape((-1, 4))
+        #     pc2 = pc2.reshape((-1, 4))
 
-            pc1 = pc1[np.random.choice(pc1.shape[0], 16384, replace=False), :]
-            pc2 = pc2[np.random.choice(pc2.shape[0], 16384, replace=False), :]
+        #     pc1 = pc1[np.random.choice(pc1.shape[0], 16384, replace=False), :]
+        #     pc2 = pc2[np.random.choice(pc2.shape[0], 16384, replace=False), :]
 
-            pc1 = pc1.reshape((-1, 8))
-            pc2 = pc2.reshape((-1, 8))
+        #     pc1 = pc1.reshape((-1, 8))
+        #     pc2 = pc2.reshape((-1, 8))
 
-            pc1, pc2 = torch.tensor(pc1, dtype=torch.double), torch.tensor(pc2, dtype=torch.double)
+        #     pc1, pc2 = torch.tensor(pc1, dtype=torch.double), torch.tensor(pc2, dtype=torch.double)
 
         # Ensure the number of keypoints -> False
         if self.ensure_kpts_num:
@@ -240,16 +238,20 @@ class SparseDataset(Dataset):
         kp2_np = np.array([(kp[0], kp[1], kp[2], 1) for kp in kp2])
 
         vis_registered_pointcloud = False
-        if vis_registered_pointcloud:
+        if self.descriptor == 'pointnet' or self.descriptor == 'pointnetmsg' or vis_registered_pointcloud:
             pc_file1 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
             pc_file2 = os.path.join('/media/vision/Seagate/DataSets/kitti/dataset/sequences', sequence, "velodyne" ,'%06d.bin' % index_in_seq)
             pc1 = np.fromfile(pc_file1, dtype=np.float32)
             pc2 = np.fromfile(pc_file2, dtype=np.float32)
+            pc1 = pc1.reshape((-1, 4))
+            pc2 = pc2.reshape((-1, 4))
+            pc1 = pc1[np.random.choice(pc1.shape[0], 16384, replace=False), :]
+            pc2 = pc2[np.random.choice(pc2.shape[0], 16384, replace=False), :]
             pc1 = pc1.reshape((-1, 8))
             pc2 = pc2.reshape((-1, 8))
-
-            kp1_np = np.array([(kp[0], kp[1], kp[2], 1) for kp in pc1]) 
-            kp2_np = np.array([(kp[0], kp[1], kp[2], 1) for kp in pc2])
+        else:
+            pc1 = np.zeros((1, 8))
+            pc2 = np.zeros((1, 8))
 
         scores1_np = np.array(score1) 
         scores2_np = np.array(score2)
@@ -311,13 +313,19 @@ class SparseDataset(Dataset):
         kp1_np = kp1_np[:, :3]
         kp2_np = kp2_np[:, :3]
 
+        # descs1, descs2  = np.multiply(descs1, 1/norm1), np.multiply(descs2, 1/norm2)
         norm1, norm2 = np.linalg.norm(descs1, axis=1), np.linalg.norm(descs2, axis=1)
         norm1, norm2 = norm1.reshape(kp1_num, 1), norm2.reshape(kp2_num, 1)
-        descs1, descs2  = np.multiply(descs1, 1/norm1), np.multiply(descs2, 1/norm2)
+        epsilon = 1e-8  # small constant to prevent division by zero
+        norm1, norm2 = norm1 + epsilon, norm2 + epsilon
+        descs1, descs2 = np.where(norm1 != 0, np.multiply(descs1, 1/norm1), 0), np.where(norm2 != 0, np.multiply(descs2, 1/norm2), 0)
+
+        np.set_printoptions(threshold=np.inf)
+        
+        # print(descs1)
 
         descs1, descs2 = torch.tensor(descs1, dtype=torch.double), torch.tensor(descs2, dtype=torch.double)
         scores1_np, scores2_np = torch.tensor(scores1_np, dtype=torch.double), torch.tensor(scores2_np, dtype=torch.double)
-        
 
         return{
             # 'skip': False,
@@ -331,10 +339,10 @@ class SparseDataset(Dataset):
             'gt_matches1': match2,
             'sequence': sequence,
             'idx0': index_in_seq,
-            # 'idx1': index_in_seq2,
-            # 'pose1': pose1,
-            # 'pose2': pose2,
-            # 'T_cam0_velo': T_cam0_velo,
+            'idx1': index_in_seq2,
+            'pose1': pose1,
+            'pose2': pose2,
+            'T_cam0_velo': T_cam0_velo,
             'T_gt': T_gt,
             'cloud0': pc1,
             'cloud1': pc2,
