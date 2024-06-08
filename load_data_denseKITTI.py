@@ -121,14 +121,30 @@ class SparseDataset(Dataset):
         # idx=d[idx]
         index_in_seq = self.dataset[idx]['anc_idx']
         index_in_seq2 = self.dataset[idx]['pos_idx']
+       
         seq = self.dataset[idx]['seq']
+        sequence = '%02d'%seq
         # trans = self.dataset[idx]['trans']
         # rot = self.dataset[idx]['rot']
+        # print("seq: ", seq, "idx: ", index_in_seq, "idx2: ", index_in_seq2)
+        pc_file1 = os.path.join('/media/vision/Seagate/DataSets/denseKITTI/dense_scan', sequence, '%06d.bin' % index_in_seq)
+        pc_file2 = os.path.join('/media/vision/Seagate/DataSets/denseKITTI/dense_scan', sequence, '%06d.bin' % index_in_seq2)
+        
+        pc1_w = np.reshape(np.fromfile(pc_file1, dtype=np.float64), (-1, 3))
+        pc2_w = np.reshape(np.fromfile(pc_file2, dtype=np.float64), (-1, 3))
+
+        pc1_w = pc1_w[np.random.choice(pc1_w.shape[0], 20000, replace=False), :] # 16384
+        pc2_w = pc2_w[np.random.choice(pc2_w.shape[0], 20000, replace=False), :]
+
+        pc1_w = np.array([(kp[0], kp[1], kp[2], 1) for kp in pc1_w]) 
+        pc2_w = np.array([(kp[0], kp[1], kp[2], 1) for kp in pc2_w]) 
+
+        pc1_w, pc2_w = torch.tensor(pc1_w, dtype=torch.double), torch.tensor(pc2_w, dtype=torch.double)
 
         # relative_pos = self.dataset[idx]['anc_idx']
         while True:
             if self.memory_is_enough: # If memory is enough, load all the data -> True
-                sequence = sequence = '%02d'%seq
+                sequence = '%02d'%seq
                 pc_np1 = self.pc[sequence][index_in_seq]
                 pc_np1 = pc_np1.reshape((-1, 139))
                 random_sample_indices1 = np.random.choice(len(pc_np1), 128, replace=False)
@@ -182,7 +198,7 @@ class SparseDataset(Dataset):
             kp2_num = len(kp2_w)
             kp1_w_np = np.array([(kp[0], kp[1], kp[2], 1) for kp in kp1_w]) 
             kp2_w_np = np.array([(kp[0], kp[1], kp[2], 1) for kp in kp2_w])
-
+            
             scores1_np = np.array(score1) 
             scores2_np = np.array(score2)
 
@@ -200,11 +216,15 @@ class SparseDataset(Dataset):
             # kp2_np = torch.einsum('ki,ij,jm->mk', pose2, T_cam0_velo, kp2_w_np.T)
             kp1_np = torch.einsum('ij,nj->ni', torch.inverse(pose1), kp1_w_np)
             kp2_np = torch.einsum('ij,nj->ni', torch.inverse(pose2), kp2_w_np)
+            pc1 = torch.einsum('ij,nj->ni', torch.inverse(pose1), pc1_w)
+            pc2 = torch.einsum('ij,nj->ni', torch.inverse(pose2), pc2_w)
             
             kp1_w_np = kp1_w_np[:, :3]
             kp2_w_np = kp2_w_np[:, :3]
             kp1_np = kp1_np[:, :3]
             kp2_np = kp2_np[:, :3]
+            pc1 = pc1[:, :3]
+            pc2 = pc2[:, :3]
 
             vis_registered_keypoints = False
             if vis_registered_keypoints:
@@ -227,11 +247,12 @@ class SparseDataset(Dataset):
             '''For calculating repeatibility'''
             rep = len(min1f)
 
-            if rep > 10:
+            if rep > 20:
                 break
             else:
-                print()
-                print("rep < 10: ", rep)
+                pass
+                # print()
+                # print("rep < 10: ", rep)
 
         '''
         If you got high-quality keypoints, you can set the 
@@ -286,8 +307,8 @@ class SparseDataset(Dataset):
             'pose2': pose2,
             'T_cam0_velo': T_cam0_velo,
             'T_gt': T_gt,
-            # 'cloud0': pc1,
-            # 'cloud1': pc2,
+            'cloud0': pc1,
+            'cloud1': pc2,
             # 'all_matches': list(all_matches),
             # 'file_name': file_name
             'rep': rep

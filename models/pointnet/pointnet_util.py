@@ -315,7 +315,8 @@ class PointNetSetKptsMsg(nn.Module):
         if points is not None:
             points = points.permute(0, 2, 1)
         B, N, C = xyz.shape
-        S = self.npoint
+        _, S, _ = kpts.shape
+        # S = self.npoint
         new_xyz = kpts
         new_points_list = []
         for i, radius in enumerate(self.radius_list):

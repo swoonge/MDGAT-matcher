@@ -7,10 +7,13 @@ from torch.autograd import Variable
 import torch.multiprocessing
 from tqdm import tqdm
 from torch import optim
+import open3d as o3d
+import open3d.visualization as vis
 import time
+import numpy as np
 from tensorboardX import SummaryWriter
 from models.superglue import SuperGlue
-from models.mdgat_Rops_SG import MDGAT
+from models.mdgat_denseKITTI import MDGAT
 torch.set_grad_enabled(True)
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -51,19 +54,19 @@ parser.add_argument(
     help='Resuming from existing model')
 
 parser.add_argument(
-    '--net', type=str, default='superglue', 
+    '--net', type=str, default='mdgat', 
     help='Choose net structure : mdgat superglue')
 
 parser.add_argument(
-    '--loss_method', type=str, default='superglue',
+    '--loss_method', type=str, default='gap_loss',
     help='Choose loss function : superglue triplet_loss gap_loss')
 
 parser.add_argument(
-    '--mutual_check', type=bool, default=True,  # True False
+    '--mutual_check', type=bool, default=False,  # True False
     help='If perform mutual check')
 
 parser.add_argument(
-    '--k', type=int, default=[128, None, 128, None, 64, None, 64, None], 
+    '--k', type=int, default=[64, None, 64, None, 32, None, 32, None], 
     help='Mdgat structure. None means connect all the nodes.')
 
 parser.add_argument(
@@ -71,7 +74,7 @@ parser.add_argument(
     help='Layers number of GNN')
 
 parser.add_argument(
-    '--descriptor', type=str, default='Rops', 
+    '--descriptor', type=str, default='pointnet', 
     help='Choose keypoint descriptor : FPFH pointnet pointnetmsg FPFH_gloabal FPFH_only')
 
 parser.add_argument(
@@ -133,7 +136,7 @@ parser.add_argument(
 if __name__ == '__main__':
     opt = parser.parse_args()
     
-    from load_data_Rops_SG_0530 import SparseDataset
+    from load_data_denseKITTI import SparseDataset
     today = datetime.datetime.now().strftime("%m_%d_%H_%M")
     
     if opt.net == 'raw':
@@ -149,7 +152,6 @@ if __name__ == '__main__':
     log_path = Path(log_path)
     log_path.mkdir(exist_ok=True, parents=True)
     logger = SummaryWriter(log_path)
-    
     
     model_out_path = '{}/{}/{}-l{}-{}-{}-{}' .format(opt.model_out_path, opt.dataset, opt.net, opt.l, opt.loss_method, opt.descriptor, today)
     if opt.descriptor == 'pointnet' or opt.descriptor == 'pointnetmsg':
@@ -188,9 +190,9 @@ if __name__ == '__main__':
                 'train_step':opt.train_step,
                 'L':opt.l,
                 'scheduler_gamma': 0.1**(1/100),
-                'descriptor_dim': 256,
-                'keypoint_encoder': [32, 64, 128, 256],
-                'descritor_encoder': [135, 256],
+                'descriptor_dim': 128,
+                'keypoint_encoder': [32, 64, 128],
+                'descritor_encoder': [64, 128],
                 'GNN_layers': ['self', 'cross'] * 9,
             }
         }
@@ -229,11 +231,9 @@ if __name__ == '__main__':
     val_set = SparseDataset(opt, 'val')
     
     val_loader = torch.utils.data.DataLoader(dataset=val_set, shuffle=True, batch_size=opt.batch_size, num_workers=1, drop_last=True, pin_memory = True)
-    train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=True, batch_size=opt.batch_size, num_workers=1, drop_last=True, pin_memory = True)
+    train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=False, batch_size=opt.batch_size, num_workers=1, drop_last=True, pin_memory = True)
     
     mean_loss = []
-    import logging
-    
     for epoch in range(start_epoch, opt.epoch+1):
         epoch_loss = 0
         current_loss = 0
@@ -253,19 +253,54 @@ if __name__ == '__main__':
                         pred[k] = Variable(pred[k].to(device))
                     else:
                         pred[k] = Variable(torch.stack(pred[k]).to(device))
-
+            print(pred['cloud0'].shape, pred['cloud1'].shape)
             # print(pred['keypoints0'].shape, pred['keypoints1'].shape, pred['scores0'].shape, pred['scores1'].shape, pred['descriptors0'].shape, pred['descriptors1'].shape)
             # torch.Size([64, 128, 3]) torch.Size([64, 128, 3]) torch.Size([64, 128]) torch.Size([64, 128]) torch.Size([64, 128, 135]) torch.Size([64, 128, 135])
-
             data = net(pred)
 
             for k, v in pred.items(): 
                 pred[k] = v[0]
             pred = {**pred, **data}
+
             
-            if 'skip_train' in pred: # no keypoint
+            # try:
+            #     print('last loss: ', last_pred['loss'])
+            # except:
+            #     pass
+            if pred['loss'].isnan().sum() > 0:
+                print('last loss: ', last_pred['loss'])
+                print(pred['loss'].isnan().sum(), ' s\'nan', ': ', pred['loss'].isnan())
+                print('sequence: ', pred['sequence'])
+                print('idx0: ', pred['idx0'])
+                print('idx1: ', pred['idx1'])
+
+                # print('Loss is abnormal or there are no kypoint, so skip this batch')
+                # pc0 = pred['cloud0'].cpu().numpy()
+                # kp0 = pred['keypoints0'].cpu().numpy()
+
+                # pcd0 = o3d.geometry.PointCloud()
+                # pcd0.points = o3d.utility.Vector3dVector(pc0[:, :3])
+                # pcd0.colors = o3d.utility.Vector3dVector(np.ones((pc0.shape[0], 3)) * [0.5, 0.5, 0.5])
+
+                # kpcd0 = o3d.geometry.PointCloud()
+                # kpcd0.points = o3d.utility.Vector3dVector(kp0[:, :3])
+                # kpcd0.colors = o3d.utility.Vector3dVector(np.ones((kp0.shape[0], 3)) * [1, 0, 0])
+                
+                # pc1 = pred['cloud1'].cpu().numpy()
+                # kp1 = pred['keypoints1'].cpu().numpy()
+
+                # pcd1 = o3d.geometry.PointCloud()
+                # pcd1.points = o3d.utility.Vector3dVector(pc1[:, :3])
+                # pcd1.colors = o3d.utility.Vector3dVector(np.ones((pc1.shape[0], 3)) * [0.5, 0.5, 0.5])
+
+                # kpcd1 = o3d.geometry.PointCloud()
+                # kpcd1.points = o3d.utility.Vector3dVector(kp1[:, :3])
+                # kpcd1.colors = o3d.utility.Vector3dVector(np.ones((kp1.shape[0], 3)) * [1, 0, 0])
+
+                # vis.draw_geometries([pcd1, kpcd1])
                 continue
             
+            last_pred = pred
             optimizer.zero_grad()
             Loss = pred['loss']
             
