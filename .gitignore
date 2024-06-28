@@ -11,3 +11,6 @@ outputs/
 *.bin
 logs
 
+denseKITTI/*
+checkpoint/*
+

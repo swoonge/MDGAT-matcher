@@ -21,7 +21,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 parser = argparse.ArgumentParser(description='Point cloud matching training ', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument('--voxel_size', type=float, default=0.2, help='voxel_size')
 parser.add_argument('--sinkhorn_iterations', type=int, default=20, help='Number of Sinkhorn iterations')
-parser.add_argument('--learning_rate', type=int, default=0.0001, help='Learning rate')
+parser.add_argument('--learning_rate', '-lr', type=float, default=0.0001, help='Learning rate')
 parser.add_argument('--epoch', type=int, default=500, help='Number of epoches')
 parser.add_argument('--memory_is_enough', type=bool, default=True, help='If memory is enough, load all the data')
 parser.add_argument('--batch_size', type=int, default=32, help='Batch size') #128
@@ -77,7 +77,7 @@ if __name__ == '__main__':
     model_out_path = Path(model_out_path)
     model_out_path.mkdir(exist_ok=True, parents=True)
 
-    print("Train",opt.net,"net with \nStructure k:",opt.k,"\nDescriptor: ",opt.descriptor,"\nLoss: ",opt.loss_method,"\nin Dataset: ",opt.dataset,
+    print("Train",opt.net,"net with \nDescriptor: ",opt.descriptor,"\nLoss: ",opt.loss_method,"\nin Dataset: ",opt.dataset,
     "\n====================",
     "\nmodel_out_path: ", model_out_path,
     "\nlog_path: ",log_path)
@@ -100,7 +100,6 @@ if __name__ == '__main__':
                 'match_threshold': opt.match_threshold,
                 'lr': lr,
                 'loss_method': opt.loss_method,
-                'k': opt.k,
                 'descriptor': opt.descriptor,
                 'mutual_check': opt.mutual_check,
                 'triplet_loss_gamma': opt.triplet_loss_gamma,
@@ -171,7 +170,7 @@ if __name__ == '__main__':
                         pred[k] = Variable(pred[k].to(device))
                     else:
                         pred[k] = Variable(torch.stack(pred[k]).to(device))
-            print(pred['cloud0'].shape, pred['cloud1'].shape)
+            # print(pred['cloud0'].shape, pred['cloud1'].shape)
             # print(pred['keypoints0'].shape, pred['keypoints1'].shape, pred['scores0'].shape, pred['scores1'].shape, pred['descriptors0'].shape, pred['descriptors1'].shape)
             # torch.Size([64, 128, 3]) torch.Size([64, 128, 3]) torch.Size([64, 128]) torch.Size([64, 128]) torch.Size([64, 128, 135]) torch.Size([64, 128, 135])
             data = net(pred)

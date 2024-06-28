@@ -47,7 +47,6 @@ import time
 
 from models.pointnet.pointnet_util import PointNetSetKptsMsg, PointNetSetAbstraction
 
-
 def MLP(channels: list, do_bn=True):
     """ Multi-layer perceptron """
     n = len(channels)

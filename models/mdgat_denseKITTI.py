@@ -4,6 +4,23 @@ from torch import nn
 import time
 from models.pointnet.pointnet_util import PointNetSetKptsMsg, PointNetSetAbstraction
 
+def normalize_keypoints_pc(kpts, point_cloud):
+    """ Normalize keypoints locations based on point cloud range """
+    # 포인트 클라우드의 범위를 계산
+    min_coords = point_cloud.min(dim=1, keepdim=True).values
+    max_coords = point_cloud.max(dim=1, keepdim=True).values
+
+    # 크기 및 중심 계산
+    size = max_coords - min_coords
+    center = (max_coords + min_coords) / 2
+    scaling = size.max(dim=2, keepdim=True).values * 0.7
+
+    return ((kpts - center) / scaling, (point_cloud - center) / scaling)
+
+def masked_select_reshape(tensor, mask):
+    selected_elements = torch.masked_select(tensor, mask)
+    reshaped_elements = selected_elements.view(*mask.size())
+    return reshaped_elements
 
 def knn(x, src, k):
     '''Find k nearest neighbour, return index'''
@@ -45,6 +62,21 @@ def MLP(channels: list, do_bn=True):
             layers.append(nn.ReLU())
     return nn.Sequential(*layers)
 
+def MLP(channels: list, do_bn=True, dropout_probs=None):
+    """ Multi-layer perceptron """
+    n = len(channels)
+    layers = []
+    for i in range(1, n):
+        layers.append(nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
+        if i < (n-1):
+            if do_bn:
+                layers.append(nn.BatchNorm1d(channels[i]))
+                # layers.append(nn.InstanceNorm1d(channels[i]))
+            layers.append(nn.ReLU())
+            if dropout_probs and i - 1 < len(dropout_probs):
+                layers.append(nn.Dropout(dropout_probs[i - 1]))
+    return nn.Sequential(*layers)
+
 
 '''
 Four kinds of descriptor encoder: 
@@ -65,7 +97,7 @@ class PointnetEncoder(nn.Module):
         # self.bn2 = nn.BatchNorm1d(256)
         # self.drop2 = nn.Dropout(0.5)
         # self.fc3 = nn.Linear(256, feature_dim)
-        self.mlp = MLP([feature_dim*2, feature_dim*2, feature_dim])
+        self.mlp = MLP([feature_dim*2, feature_dim*2, feature_dim], do_bn=True, dropout_probs=[0.4, 0.5])
         self.kenc = KeypointEncoder(feature_dim, layers)
 
     def forward(self, xyz, kpts):
@@ -78,12 +110,9 @@ class PointnetEncoder(nn.Module):
             norm = None
 
         # begin = time.time()
-        # print('xyz',xyz.shape, 'kp', kpts.shape)
         l1_xyz, l1_points = self.sa1(xyz, norm, kpts)
-        # print('sa1',time.time() - begin)
         # begin = time.time()
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
-        # print('sa2',time.time() - begin)
         # l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
         
         desc = l2_points.view(B, 128, -1) # pointnet의 output을 128차원으로 변환 -> 각 포인트의 descriptor >> torch.Size([32, 128, 128]) == (batch, descriptor_dim, num_points)
@@ -91,15 +120,11 @@ class PointnetEncoder(nn.Module):
         # desc = self.drop2(F.relu(self.bn2(self.fc2(desc))))
         # desc = self.fc3(desc)
         # desc = F.log_softmax(desc, -1)
-        # begin = time.time()
-        # print(kpts.shape, desc.shape)
         kpts = self.kenc(kpts) # keypoint의 위치를 MLP로 encoding >> torch.Size([32, 128, 3]) -> torch.Size([32, 256, 128]) == (batch, feature_dim, num_points)
-        # print('kenc',time.time() - begin)
-        # begin = time.time()
-        # print(kpts.shape, desc.shape, torch.cat([kpts, desc], dim=1).shape)
         desc = self.mlp(torch.cat([kpts, desc], dim=1))
-        # print('mlp',time.time() - begin)
         return desc
+    
+    
 class PointnetEncoderMsg(nn.Module):
     '''Descritor encoder 2: multi-scale pointnet'''
     def __init__(self,feature_dim: int,layers,normal_channel=False):
@@ -275,7 +300,6 @@ class AttentionalGNN(nn.Module):
                 src0, src1 = desc0, desc1
             k0 = 0
             if i > 2*L-1-len(k0_list):
-                # k = k_list[i-2*L+len(k_list)]
                 k0 = k0_list[i-2*L+len(k0_list)]
                 k1 = k1_list[i-2*L+len(k1_list)]
                 delta0, delta1 = layer(desc0, src0, k0), layer(desc1, src1, k1)
@@ -284,7 +308,6 @@ class AttentionalGNN(nn.Module):
             
             desc0, desc1 = (desc0 + delta0), (desc1 + delta1)
             i+=1
-            # print("layer", i, " || ", name, " || ", desc0.shape[2], src0.shape[2], k0)
         return desc0, desc1
 
 
@@ -359,7 +382,6 @@ class MDGAT(nn.Module):
 
         self.lr = config['lr']
         self.loss_method = config['loss_method']
-        self.k = config['k']
         self.mutual_check = config['mutual_check']
         self.triplet_loss_gamma = config['triplet_loss_gamma']
         self.train_step = config['train_step']
@@ -381,8 +403,10 @@ class MDGAT(nn.Module):
                 'matching_scores1': kpts1.new_zeros(shape1)[0],
                 'skip_train': True
             }
-
         pc0, pc1 = data['cloud0'].double(), data['cloud1'].double()
+        kpts0, pc0 = normalize_keypoints_pc(kpts0, pc0)
+        kpts1, pc1 = normalize_keypoints_pc(kpts1, pc1)
+
         desc0 = self.penc(pc0, kpts0)
         desc1 = self.penc(pc1, kpts1)
 
@@ -434,9 +458,7 @@ class MDGAT(nn.Module):
  
     def forward(self, data):
         """Run SuperGlue on a pair of keypoints and descriptors"""
-        
         kpts0, kpts1 = data['keypoints0'].double(), data['keypoints1'].double()
-    
         if kpts0.shape[1] == 0 or kpts1.shape[1] == 0:  # no keypoints
             shape0, shape1 = kpts0.shape[:-1], kpts1.shape[:-1]
             return {
@@ -446,8 +468,10 @@ class MDGAT(nn.Module):
                 'matching_scores1': kpts1.new_zeros(shape1)[0],
                 'skip_train': True
             }
-
         pc0, pc1 = data['cloud0'].double(), data['cloud1'].double()
+        kpts0, pc0 = normalize_keypoints_pc(kpts0, pc0)
+        kpts1, pc1 = normalize_keypoints_pc(kpts1, pc1)
+
         desc0 = self.penc(pc0, kpts0)
         desc1 = self.penc(pc1, kpts1)
         """
@@ -511,12 +535,22 @@ class MDGAT(nn.Module):
             else:
                 if self.mutual_check:
                     batch = indices0.size(0)
-                    a0 = arange_like(indices0, 1)[None][valid0].view(batch,-1) == indices1.gather(1, indices0[valid0].view(batch,-1))
-                    a1 = arange_like(indices1, 1)[None][valid1].view(batch,-1) == indices0.gather(1, indices1[valid1].view(batch,-1))
+                    indices0_valid = torch.where(valid0, arange_like(indices0, 1).expand_as(indices0), torch.tensor(-1, device=valid0.device))
+                    indices1_valid = torch.where(valid1, arange_like(indices1, 1).expand_as(indices1), torch.tensor(-1, device=valid1.device))
+                    valid0_indices = torch.where(valid0, indices0, -2)
+                    valid1_indices = torch.where(valid1, indices1, -2)
+                    # selected_indices0 = masked_select_reshape(indices0, valid0)
+                    # valid0_arange_ = indices1.gather(1, indices0[valid0].view(batch,-1))
+                    
+                    # print(" | indices0 ", indices0[0], " | valid0_arange ", indices0_valid)
+                    # print(" | indices0[valid0].view(batch,-1) ", indices0[valid0].view(batch,-1).shape, " | ㅇㅇ", valid0_arange_)
+
+                    a0 = indices0_valid == valid0_indices 
+                    a1 = indices1_valid == valid1_indices
                     mutual0 = torch.zeros_like(indices0, device='cuda') > 0
                     mutual1 = torch.zeros_like(indices1, device='cuda') > 0
-                    mutual0[valid0] = a0
-                    mutual1[valid1] = a1
+                    mutual0.where(valid0, a0)
+                    mutual1.where(valid1, a1)
                     mscores0 = torch.where(mutual0, max0.values.exp(), zero)
                     mscores1 = torch.where(mutual1, max1.values.exp(), zero)
                 else:
