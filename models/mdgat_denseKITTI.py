@@ -48,20 +48,6 @@ def get_graph_feature(x, src, k, idx=None):
 
     return A
     
-def MLP(channels: list, do_bn=True):
-    """ Multi-layer perceptron """
-    n = len(channels)
-    layers = []
-    for i in range(1, n):
-        layers.append(
-            nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
-        if i < (n-1):
-            if do_bn:
-                layers.append(nn.BatchNorm1d(channels[i]))
-                # layers.append(nn.InstanceNorm1d(channels[i]))
-            layers.append(nn.ReLU())
-    return nn.Sequential(*layers)
-
 def MLP(channels: list, do_bn=True, dropout_probs=None):
     """ Multi-layer perceptron """
     n = len(channels)
@@ -88,7 +74,7 @@ class PointnetEncoder(nn.Module):
         super().__init__()
         in_channel = 5 if normal_channel else 0
         self.normal_channel = normal_channel
-        self.sa1 = PointNetSetKptsMsg(128, [2], [32], in_channel, [[64, 64, 128]])
+        self.sa1 = PointNetSetKptsMsg(256, [1], [32], in_channel, [[64, 64, 128]])
         self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [256, 256, 128], True)
         # self.fc1 = nn.Linear(1024, 512)
         # self.bn1 = nn.BatchNorm1d(512)
@@ -433,12 +419,16 @@ class MDGAT(nn.Module):
         else:
             if self.mutual_check:
                 batch = indices0.size(0)
-                a0 = arange_like(indices0, 1)[None][valid0].view(batch,-1) == indices1.gather(1, indices0[valid0].view(batch,-1))
-                a1 = arange_like(indices1, 1)[None][valid1].view(batch,-1) == indices0.gather(1, indices1[valid1].view(batch,-1))
+                indices0_valid = torch.where(valid0, arange_like(indices0, 1).expand_as(indices0), torch.tensor(-1, device=valid0.device))
+                indices1_valid = torch.where(valid1, arange_like(indices1, 1).expand_as(indices1), torch.tensor(-1, device=valid1.device))
+                valid0_indices = torch.where(valid0, indices0, -2)
+                valid1_indices = torch.where(valid1, indices1, -2)
+                a0 = indices0_valid == valid0_indices 
+                a1 = indices1_valid == valid1_indices
                 mutual0 = torch.zeros_like(indices0, device='cuda') > 0
                 mutual1 = torch.zeros_like(indices1, device='cuda') > 0
-                mutual0[valid0] = a0
-                mutual1[valid1] = a1
+                mutual0.where(valid0, a0)
+                mutual1.where(valid1, a1)
                 mscores0 = torch.where(mutual0, max0.values.exp(), zero)
                 mscores1 = torch.where(mutual1, max1.values.exp(), zero)
             else:

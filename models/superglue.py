@@ -47,18 +47,32 @@ import time
 
 from models.pointnet.pointnet_util import PointNetSetKptsMsg, PointNetSetAbstraction
 
-def MLP(channels: list, do_bn=True):
+def normalize_keypoints_pc(kpts, point_cloud):
+    """ Normalize keypoints locations based on point cloud range """
+    # 포인트 클라우드의 범위를 계산
+    min_coords = point_cloud.min(dim=1, keepdim=True).values
+    max_coords = point_cloud.max(dim=1, keepdim=True).values
+
+    # 크기 및 중심 계산
+    size = max_coords - min_coords
+    center = (max_coords + min_coords) / 2
+    scaling = size.max(dim=2, keepdim=True).values * 0.7
+
+    return ((kpts - center) / scaling, (point_cloud - center) / scaling)
+
+def MLP(channels: list, do_bn=True, dropout_probs=None):
     """ Multi-layer perceptron """
     n = len(channels)
     layers = []
     for i in range(1, n):
-        layers.append(
-            nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
+        layers.append(nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
         if i < (n-1):
             if do_bn:
                 layers.append(nn.BatchNorm1d(channels[i]))
                 # layers.append(nn.InstanceNorm1d(channels[i]))
             layers.append(nn.ReLU())
+            if dropout_probs and i - 1 < len(dropout_probs):
+                layers.append(nn.Dropout(dropout_probs[i - 1]))
     return nn.Sequential(*layers)
 
 
@@ -111,16 +125,6 @@ class PointnetEncoder(nn.Module):
         self.normal_channel = normal_channel
         self.sa1 = PointNetSetKptsMsg(256, [1], [32], in_channel, [[64, 64, 128]])
         self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [256, 256, 128], True)
-        # self.fc1 = nn.Linear(1024, 512)
-        # self.bn1 = nn.BatchNorm1d(512)
-        # self.drop1 = nn.Dropout(0.4)
-        # self.fc2 = nn.Linear(512, 256)
-        # self.bn2 = nn.BatchNorm1d(256)
-        # self.drop2 = nn.Dropout(0.5)
-        # self.fc3 = nn.Linear(256, feature_dim)
-
-        # self.mlp = MLP([feature_dim*2, feature_dim*2, feature_dim])
-        # self.kenc = KeypointEncoder(feature_dim, layers)
 
     def forward(self, xyz, kpts, score):
         B, _, _ = xyz.shape
@@ -138,30 +142,20 @@ class PointnetEncoder(nn.Module):
         # print('sa2',time.time() - begin)
         # l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
         desc = l2_points.view(B, 128, -1)
-        # desc = self.drop1(F.relu(self.bn1(self.fc1(desc))))
-        # desc = self.drop2(F.relu(self.bn2(self.fc2(desc))))
-        # desc = self.fc3(desc)
-        # desc = F.log_softmax(desc, -1)
-        # begin = time.time()
-
-        # kpts = self.kenc(kpts, score)
-        # print('kenc',time.time() - begin)
-        # begin = time.time()
-        # desc = self.mlp(torch.cat([kpts, desc], dim=1))
-        # print('mlp',time.time() - begin)
         return desc
 
 class KeypointEncoder(nn.Module):
     """ Joint encoding of visual appearance and location using MLPs"""
     def __init__(self, feature_dim, layers):
         super().__init__()
-        # self.encoder = MLP([3] + layers + [feature_dim])
-        self.encoder = MLP([4] + layers + [feature_dim])
+        self.encoder = MLP([3] + layers + [feature_dim])
+        # self.encoder = MLP([4] + layers + [feature_dim])
         nn.init.constant_(self.encoder[-1].bias, 0.0)
 
     def forward(self, kpts, scores):
     # def forward(self, kpts):
-        inputs = [kpts.transpose(1, 2), scores.unsqueeze(1)]
+        # inputs = [kpts.transpose(1, 2), scores.unsqueeze(1)]
+        inputs = kpts.transpose(1, 2)
         return self.encoder(torch.cat(inputs, dim=1))
 
 class DescriptorEncoder(nn.Module):
@@ -199,6 +193,34 @@ class DescriptorGloabalEncoder(nn.Module):
         gloab = gloab.repeat(1,1,n)
         desc = torch.cat([desc, gloab], 1)
         desc = self.encoder2(desc)
+        return desc
+    
+class PointnetEncoder(nn.Module):
+    '''Descritor encoder 1: pointnet'''
+    def __init__(self,feature_dim: int,layers,normal_channel=False):
+        super().__init__()
+        in_channel = 5 if normal_channel else 0
+        self.normal_channel = normal_channel
+        self.sa1 = PointNetSetKptsMsg(128, [2], [32], in_channel, [[64, 64, 128]])
+        self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [256, 256, 128], True)
+        self.mlp = MLP([feature_dim*2, feature_dim*2, feature_dim], do_bn=True, dropout_probs=[0.4, 0.5])
+        self.kenc = KeypointEncoder(feature_dim, layers)
+
+    def forward(self, xyz, kpts):
+        B, _, _ = xyz.shape
+        xyz = xyz.permute(0, 2, 1)
+        if self.normal_channel:
+            norm = xyz[:, 3:, :]
+            xyz = xyz[:, :3, :]
+        else:
+            norm = None
+
+        l1_xyz, l1_points = self.sa1(xyz, norm, kpts)
+        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+        
+        desc = l2_points.view(B, 128, -1) # pointnet의 output을 128차원으로 변환 -> 각 포인트의 descriptor >> torch.Size([32, 128, 128]) == (batch, descriptor_dim, num_points)
+        kpts = self.kenc(kpts) # keypoint의 위치를 MLP로 encoding >> torch.Size([32, 128, 3]) -> torch.Size([32, 256, 128]) == (batch, feature_dim, num_points)
+        desc = self.mlp(torch.cat([kpts, desc], dim=1))
         return desc
 
 # global aware
@@ -346,11 +368,13 @@ class SuperGlue(nn.Module):
         if self.descriptor == 'pointnet':
             self.kenc = KeypointEncoder(
             self.config['descriptor_dim'], self.config['keypoint_encoder'])
+            self.penc = PointnetEncoder(
+            self.config['descriptor_dim'], self.config['keypoint_encoder'])
             self.denc = pointnetDescriptorEncoder(
             self.config['descriptor_dim'], self.config['descritor_encoder'])
 
-            self.penc = PointnetEncoder(
-            self.config['descriptor_dim'], self.config['keypoint_encoder'])
+            # self.penc = PointnetEncoder(
+            # self.config['descriptor_dim'], self.config['keypoint_encoder'])
         elif self.descriptor == 'pointnetmsg':
             self.kenc = KeypointEncoder(
             self.config['descriptor_dim'], self.config['keypoint_encoder'])
