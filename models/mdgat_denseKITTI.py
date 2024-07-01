@@ -72,8 +72,12 @@ class PointnetEncoder(nn.Module):
     '''Descritor encoder 1: pointnet'''
     def __init__(self,feature_dim: int,layers,normal_channel=False):
         super().__init__()
+        # print(layers)
         in_channel = 5 if normal_channel else 0
+        self.feature_dim = feature_dim
         self.normal_channel = normal_channel
+        # self.sa1 = PointNetSetKptsMsg(128, [1], [32], in_channel, [layers])
+        # self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [feature_dim*4, feature_dim*2, self.feature_dim], True)
         self.sa1 = PointNetSetKptsMsg(256, [1], [32], in_channel, [[64, 64, 128]])
         self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [256, 256, 128], True)
         # self.fc1 = nn.Linear(1024, 512)
@@ -87,6 +91,7 @@ class PointnetEncoder(nn.Module):
         self.kenc = KeypointEncoder(feature_dim, layers)
 
     def forward(self, xyz, kpts):
+        # print("kpts", kpts.shape)
         B, _, _ = xyz.shape
         xyz = xyz.permute(0, 2, 1)
         if self.normal_channel:
@@ -101,12 +106,15 @@ class PointnetEncoder(nn.Module):
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
         # l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
         
+        # desc = l2_points.view(B, self.feature_dim, -1) # pointnet의 output을 128차원으로 변환 -> 각 포인트의 descriptor >> torch.Size([32, 128, 128]) == (batch, descriptor_dim, num_points)
         desc = l2_points.view(B, 128, -1) # pointnet의 output을 128차원으로 변환 -> 각 포인트의 descriptor >> torch.Size([32, 128, 128]) == (batch, descriptor_dim, num_points)
         # desc = self.drop1(F.relu(self.bn1(self.fc1(desc))))
         # desc = self.drop2(F.relu(self.bn2(self.fc2(desc))))
         # desc = self.fc3(desc)
         # desc = F.log_softmax(desc, -1)
         kpts = self.kenc(kpts) # keypoint의 위치를 MLP로 encoding >> torch.Size([32, 128, 3]) -> torch.Size([32, 256, 128]) == (batch, feature_dim, num_points)
+        
+        # print(kpts.shape, desc.shape)
         desc = self.mlp(torch.cat([kpts, desc], dim=1))
         return desc
     
@@ -267,12 +275,13 @@ class AttentionalPropagation(nn.Module):
 
 
 class AttentionalGNN(nn.Module):
-    def __init__(self, feature_dim: int, layer_names: list):
+    def __init__(self, feature_dim: int, layer_names: list, model='gap_loss'):
         super().__init__()
         self.layers = nn.ModuleList([
             AttentionalPropagation(feature_dim, 4)
             for _ in range(len(layer_names))])
         self.names = layer_names
+        self.model = model
 
     def forward(self, desc0, desc1, L):
         i = 0
@@ -285,7 +294,7 @@ class AttentionalGNN(nn.Module):
             else:
                 src0, src1 = desc0, desc1
             k0 = 0
-            if i > 2*L-1-len(k0_list):
+            if (i > 2*L-1-len(k0_list)) & (self.model == 'gap_loss'):
                 k0 = k0_list[i-2*L+len(k0_list)]
                 k1 = k1_list[i-2*L+len(k1_list)]
                 delta0, delta1 = layer(desc0, src0, k0), layer(desc1, src1, k1)
@@ -356,8 +365,9 @@ class MDGAT(nn.Module):
             self.penc = PointnetEncoderMsg(
             self.config['descriptor_dim'], self.config['keypoint_encoder'])
 
+        # print(self.config['loss_method'])
         self.gnn = AttentionalGNN(
-            self.config['descriptor_dim'], ['self', 'cross']*self.config['L'])
+            self.config['descriptor_dim'], ['self', 'cross']*self.config['L'], model=self.config['loss_method'])
 
         self.final_proj = nn.Conv1d(
             self.config['descriptor_dim'], self.config['descriptor_dim'],
@@ -371,6 +381,9 @@ class MDGAT(nn.Module):
         self.mutual_check = config['mutual_check']
         self.triplet_loss_gamma = config['triplet_loss_gamma']
         self.train_step = config['train_step']
+
+    def change_match_threshold(self, threshold):
+        self.config['match_threshold'] = threshold
 
     def infer_desc(self, kpts, pc):
         kpts = kpts.double()
@@ -407,33 +420,58 @@ class MDGAT(nn.Module):
         scores = log_optimal_transport(
         scores, self.bin_score,
         iters=self.config['sinkhorn_iterations'])
-    
-        '''directly determine the non_matches on scores matrix'''
-        max0, max1 = scores[:, :-1, :].max(2), scores[:, :, :-1].max(1)
-        indices0, indices1 = max0.indices, max1.indices
-        valid0, valid1 = indices0<(scores.size(2)-1), indices1<(scores.size(1)-1)
-        zero = scores.new_tensor(0)
-        if valid0.sum() == 0:
-            mscores0 = torch.zeros_like(indices0, device='cuda')
-            mscores1 = torch.zeros_like(indices1, device='cuda')
-        else:
+
+        '''Match the keypoints'''
+        if self.loss_method == 'superglue':
+            '''determine the non_matches by comparing to a pre-defined threshold'''
+            max0, max1 = scores[:, :-1, :-1].max(2), scores[:, :-1, :-1].max(1)
+            indices0, indices1 = max0.indices, max1.indices
+            zero = scores.new_tensor(0)
             if self.mutual_check:
-                batch = indices0.size(0)
-                indices0_valid = torch.where(valid0, arange_like(indices0, 1).expand_as(indices0), torch.tensor(-1, device=valid0.device))
-                indices1_valid = torch.where(valid1, arange_like(indices1, 1).expand_as(indices1), torch.tensor(-1, device=valid1.device))
-                valid0_indices = torch.where(valid0, indices0, -2)
-                valid1_indices = torch.where(valid1, indices1, -2)
-                a0 = indices0_valid == valid0_indices 
-                a1 = indices1_valid == valid1_indices
-                mutual0 = torch.zeros_like(indices0, device='cuda') > 0
-                mutual1 = torch.zeros_like(indices1, device='cuda') > 0
-                mutual0.where(valid0, a0)
-                mutual1.where(valid1, a1)
+                mutual0 = arange_like(indices0, 1)[None] == indices1.gather(1, indices0) 
+                mutual1 = arange_like(indices1, 1)[None] == indices0.gather(1, indices1)
                 mscores0 = torch.where(mutual0, max0.values.exp(), zero)
-                mscores1 = torch.where(mutual1, max1.values.exp(), zero)
+                mscores1 = torch.where(mutual1, mscores0.gather(1, indices1), zero)
+                valid0 = mutual0 & (mscores0 > self.config['match_threshold'])
+                valid1 = mutual1 & valid0.gather(1, indices1)
             else:
+                valid0 = max0.values.exp() > self.config['match_threshold']
+                valid1 = max1.values.exp() > self.config['match_threshold']
                 mscores0 = torch.where(valid0, max0.values.exp(), zero)
                 mscores1 = torch.where(valid1, max1.values.exp(), zero)
+        else:
+            '''directly determine the non_matches on scores matrix'''
+            max0, max1 = scores[:, :-1, :].max(2), scores[:, :, :-1].max(1)
+            indices0, indices1 = max0.indices, max1.indices
+            valid0, valid1 = indices0<(scores.size(2)-1), indices1<(scores.size(1)-1)
+            zero = scores.new_tensor(0)
+            if valid0.sum() == 0:
+                mscores0 = torch.zeros_like(indices0, device='cuda')
+                mscores1 = torch.zeros_like(indices1, device='cuda')
+            else:
+                if self.mutual_check:
+                    batch = indices0.size(0)
+                    indices0_valid = torch.where(valid0, arange_like(indices0, 1).expand_as(indices0), torch.tensor(-1, device=valid0.device))
+                    indices1_valid = torch.where(valid1, arange_like(indices1, 1).expand_as(indices1), torch.tensor(-1, device=valid1.device))
+                    valid0_indices = torch.where(valid0, indices0, -2)
+                    valid1_indices = torch.where(valid1, indices1, -2)
+                    # selected_indices0 = masked_select_reshape(indices0, valid0)
+                    # valid0_arange_ = indices1.gather(1, indices0[valid0].view(batch,-1))
+                    
+                    # print(" | indices0 ", indices0[0], " | valid0_arange ", indices0_valid)
+                    # print(" | indices0[valid0].view(batch,-1) ", indices0[valid0].view(batch,-1).shape, " | ㅇㅇ", valid0_arange_)
+
+                    a0 = indices0_valid == valid0_indices 
+                    a1 = indices1_valid == valid1_indices
+                    mutual0 = torch.zeros_like(indices0, device='cuda') > 0
+                    mutual1 = torch.zeros_like(indices1, device='cuda') > 0
+                    mutual0.where(valid0, a0)
+                    mutual1.where(valid1, a1)
+                    mscores0 = torch.where(mutual0, max0.values.exp(), zero)
+                    mscores1 = torch.where(mutual1, max1.values.exp(), zero)
+                else:
+                    mscores0 = torch.where(valid0, max0.values.exp(), zero)
+                    mscores1 = torch.where(valid1, max1.values.exp(), zero)
         indices0 = torch.where(valid0, indices0, indices0.new_tensor(-1))
         indices1 = torch.where(valid1, indices1, indices1.new_tensor(-1))
 

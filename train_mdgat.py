@@ -108,7 +108,7 @@ if __name__ == '__main__':
                 'scheduler_gamma': 0.1**(1/100),
                 'descriptor_dim': 128,
                 'keypoint_encoder': [32, 64, 128],
-                'descritor_encoder': [64, 128],
+                'descritor_encoder': [32, 64, 128],
                 'GNN_layers': ['self', 'cross'] * 9,
             }
         }

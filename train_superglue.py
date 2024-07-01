@@ -27,7 +27,7 @@ parser.add_argument(
     help='Number of Sinkhorn iterations')
 
 parser.add_argument(
-    '--learning_rate', type=int, default=0.0001,  #0.0001
+    '--learning_rate', '-lr', type=float, default=0.0001,  #0.0001
     help='Learning rate')
 
 parser.add_argument(
@@ -190,12 +190,12 @@ if __name__ == '__main__':
                 'scheduler_gamma': 0.1**(1/100),
                 'descriptor_dim': 256,
                 'keypoint_encoder': [32, 64, 128, 256],
-                'descritor_encoder': [135, 256],
+                'descritor_encoder': [64, 128, 256],
                 'GNN_layers': ['self', 'cross'] * 9,
             }
         }
     
-    net = MDGAT(config.get('net', {}))
+    net = SuperGlue(config.get('net', {}))
     
     if torch.cuda.is_available():
         device=torch.device('cuda:{}'.format(opt.local_rank[0]))

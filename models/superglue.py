@@ -119,14 +119,14 @@ class PointnetEncoderMsg(nn.Module):
         return desc
 
 class PointnetEncoder(nn.Module):
-    def __init__(self,feature_dim: int,layers,normal_channel=True):
+    def __init__(self,feature_dim: int,layers,normal_channel=False):
         super().__init__()
         in_channel = 5 if normal_channel else 0
         self.normal_channel = normal_channel
         self.sa1 = PointNetSetKptsMsg(256, [1], [32], in_channel, [[64, 64, 128]])
         self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [256, 256, 128], True)
 
-    def forward(self, xyz, kpts, score):
+    def forward(self, xyz, kpts):
         B, _, _ = xyz.shape
         xyz = xyz.permute(0, 2, 1)
         if self.normal_channel:
@@ -162,7 +162,7 @@ class DescriptorEncoder(nn.Module):
     """ Joint encoding of visual appearance and location using MLPs"""
     def __init__(self, feature_dim, layers):
         super().__init__()
-        self.encoder = MLP([33] + layers + [feature_dim])
+        self.encoder = MLP([feature_dim*2, feature_dim*2, feature_dim])
         nn.init.constant_(self.encoder[-1].bias, 0.0)
         # self.encoder2 = MLP([feature_dim*2, feature_dim*2, feature_dim])
         # nn.init.constant_(self.encoder2[-1].bias, 0.0)
@@ -195,33 +195,33 @@ class DescriptorGloabalEncoder(nn.Module):
         desc = self.encoder2(desc)
         return desc
     
-class PointnetEncoder(nn.Module):
-    '''Descritor encoder 1: pointnet'''
-    def __init__(self,feature_dim: int,layers,normal_channel=False):
-        super().__init__()
-        in_channel = 5 if normal_channel else 0
-        self.normal_channel = normal_channel
-        self.sa1 = PointNetSetKptsMsg(128, [2], [32], in_channel, [[64, 64, 128]])
-        self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [256, 256, 128], True)
-        self.mlp = MLP([feature_dim*2, feature_dim*2, feature_dim], do_bn=True, dropout_probs=[0.4, 0.5])
-        self.kenc = KeypointEncoder(feature_dim, layers)
+# class PointnetEncoder(nn.Module):
+#     '''Descritor encoder 1: pointnet'''
+#     def __init__(self,feature_dim: int,layers,normal_channel=False):
+#         super().__init__()
+#         in_channel = 5 if normal_channel else 0
+#         self.normal_channel = normal_channel
+#         self.sa1 = PointNetSetKptsMsg(128, [2], [32], in_channel, [[64, 64, 128]])
+#         self.sa2 = PointNetSetAbstraction(None, None, None, 128 + 3, [256, 256, 128], True)
+#         self.mlp = MLP([feature_dim*2, feature_dim*2, feature_dim], do_bn=True, dropout_probs=[0.4, 0.5])
+#         self.kenc = KeypointEncoder(feature_dim, layers)
 
-    def forward(self, xyz, kpts):
-        B, _, _ = xyz.shape
-        xyz = xyz.permute(0, 2, 1)
-        if self.normal_channel:
-            norm = xyz[:, 3:, :]
-            xyz = xyz[:, :3, :]
-        else:
-            norm = None
+#     def forward(self, xyz, kpts):
+#         B, _, _ = xyz.shape
+#         xyz = xyz.permute(0, 2, 1)
+#         if self.normal_channel:
+#             norm = xyz[:, 3:, :]
+#             xyz = xyz[:, :3, :]
+#         else:
+#             norm = None
 
-        l1_xyz, l1_points = self.sa1(xyz, norm, kpts)
-        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+#         l1_xyz, l1_points = self.sa1(xyz, norm, kpts)
+#         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
         
-        desc = l2_points.view(B, 128, -1) # pointnet의 output을 128차원으로 변환 -> 각 포인트의 descriptor >> torch.Size([32, 128, 128]) == (batch, descriptor_dim, num_points)
-        kpts = self.kenc(kpts) # keypoint의 위치를 MLP로 encoding >> torch.Size([32, 128, 3]) -> torch.Size([32, 256, 128]) == (batch, feature_dim, num_points)
-        desc = self.mlp(torch.cat([kpts, desc], dim=1))
-        return desc
+#         desc = l2_points.view(B, 128, -1) # pointnet의 output을 128차원으로 변환 -> 각 포인트의 descriptor >> torch.Size([32, 128, 128]) == (batch, descriptor_dim, num_points)
+#         kpts = self.kenc(kpts) # keypoint의 위치를 MLP로 encoding >> torch.Size([32, 128, 3]) -> torch.Size([32, 256, 128]) == (batch, feature_dim, num_points)
+#         desc = self.mlp(torch.cat([kpts, desc], dim=1))
+#         return desc
 
 # global aware
 class pointnetDescriptorEncoder(nn.Module):
@@ -438,13 +438,13 @@ class SuperGlue(nn.Module):
             desc0 = self.denc(desc0) + self.kenc(kpts0, data['scores0'])
             desc1 = self.denc(desc1) + self.kenc(kpts1, data['scores1'])
             '''Multi-layer Transformer network.'''
-            desc0, desc1 = self.gnn(desc0, desc1, self.k, self.config['L'])
+            desc0, desc1 = self.gnn(desc0, desc1, self.config['L'])
             '''Final MLP projection.'''
             mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
         elif self.descriptor == 'pointnet' or self.descriptor == 'pointnetmsg':
             pc0, pc1 = data['cloud0'].double(), data['cloud1'].double()
-            desc0 = self.penc(pc0, kpts0, data['scores0'])
-            desc1 = self.penc(pc1, kpts1, data['scores1'])
+            desc0 = self.penc(pc0, kpts0)
+            desc1 = self.penc(pc1, kpts1)
             """
             3-step training
             """
@@ -454,12 +454,12 @@ class SuperGlue(nn.Module):
             elif self.train_step == 2: # update gnn only      
                 desc0, desc1 = desc0.detach(), desc1.detach()
                 '''Multi-layer Transformer network.'''
-                desc0, desc1 = self.gnn(desc0, desc1, self.k, self.config['L'])
+                desc0, desc1 = self.gnn(desc0, desc1)
                 '''Final MLP projection.'''
                 mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
             elif self.train_step == 3: # update pointnet and gnn
                 '''Multi-layer Transformer network.'''
-                desc0, desc1 = self.gnn(desc0, desc1, self.k, self.config['L'])
+                desc0, desc1 = self.gnn(desc0, desc1)
                 '''Final MLP projection.'''
                 mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
             else:
@@ -468,7 +468,7 @@ class SuperGlue(nn.Module):
             desc0, desc1 = data['descriptors0'].double(), data['descriptors1'].double()
             desc0 = self.denc(desc0) 
             desc1 = self.denc(desc1) 
-            desc0, desc1 = self.gnn(desc0, desc1, self.k, self.config['L'])
+            desc0, desc1 = self.gnn(desc0, desc1)
             mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
         else:
             raise Exception('Invalid descriptor.')
